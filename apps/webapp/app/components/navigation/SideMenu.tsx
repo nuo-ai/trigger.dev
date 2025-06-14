@@ -21,12 +21,13 @@ import {
 import { useNavigation } from "@remix-run/react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import simplur from "simplur";
-import { AISparkleIcon } from "~/assets/icons/AISparkleIcon";
+import { BranchEnvironmentIconSmall } from "~/assets/icons/EnvironmentIcons";
 import { RunsIconExtraSmall } from "~/assets/icons/RunsIcon";
 import { TaskIconSmall } from "~/assets/icons/TaskIcon";
 import { WaitpointTokenIcon } from "~/assets/icons/WaitpointTokenIcon";
 import { Avatar } from "~/components/primitives/Avatar";
 import { type MatchedEnvironment } from "~/hooks/useEnvironment";
+import { useFeatures } from "~/hooks/useFeatures";
 import { type MatchedOrganization } from "~/hooks/useOrganizations";
 import { type MatchedProject } from "~/hooks/useProject";
 import { useHasAdminAccess } from "~/hooks/useUser";
@@ -61,7 +62,7 @@ import {
   v3UsagePath,
   v3WaitpointTokensPath,
 } from "~/utils/pathBuilder";
-import { useKapaWidget } from "../../hooks/useKapaWidget";
+import { AskAI } from "../AskAI";
 import { FreePlanUsage } from "../billing/FreePlanUsage";
 import { ConnectionIcon, DevPresencePanel, useDevPresence } from "../DevPresence";
 import { ImpersonationBanner } from "../ImpersonationBanner";
@@ -75,18 +76,16 @@ import {
   PopoverMenuItem,
   PopoverTrigger,
 } from "../primitives/Popover";
-import { ShortcutKey } from "../primitives/ShortcutKey";
 import { TextLink } from "../primitives/TextLink";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "../primitives/Tooltip";
 import { ShortcutsAutoOpen } from "../Shortcuts";
 import { UserProfilePhoto } from "../UserProfilePhoto";
+import { V4Badge } from "../V4Badge";
 import { EnvironmentSelector } from "./EnvironmentSelector";
 import { HelpAndFeedback } from "./HelpAndFeedbackPopover";
 import { SideMenuHeader } from "./SideMenuHeader";
 import { SideMenuItem } from "./SideMenuItem";
 import { SideMenuSection } from "./SideMenuSection";
-import { BranchEnvironmentIconSmall } from "~/assets/icons/EnvironmentIcons";
-import { V4Badge } from "../V4Badge";
 
 type SideMenuUser = Pick<User, "email" | "admin"> & { isImpersonating: boolean };
 export type SideMenuProject = Pick<
@@ -342,6 +341,7 @@ function ProjectSelector({
   const currentPlan = useCurrentPlan();
   const [isOrgMenuOpen, setOrgMenuOpen] = useState(false);
   const navigation = useNavigation();
+  const { isManagedCloud } = useFeatures();
 
   let plan: string | undefined = undefined;
   if (currentPlan?.v3Subscription?.isPaying === false) {
@@ -410,16 +410,18 @@ function ProjectSelector({
               <CogIcon className="size-4 text-text-dimmed" />
               <span className="text-text-bright">Settings</span>
             </LinkButton>
-            <LinkButton
-              variant="secondary/small"
-              to={v3UsagePath(organization)}
-              fullWidth
-              iconSpacing="gap-1.5"
-              className="group-hover/button:border-charcoal-500"
-            >
-              <ChartBarIcon className="size-4 text-text-dimmed" />
-              <span className="text-text-bright">Usage</span>
-            </LinkButton>
+            {isManagedCloud && (
+              <LinkButton
+                variant="secondary/small"
+                to={v3UsagePath(organization)}
+                fullWidth
+                iconSpacing="gap-1.5"
+                className="group-hover/button:border-charcoal-500"
+              >
+                <ChartBarIcon className="size-4 text-text-dimmed" />
+                <span className="text-text-bright">Usage</span>
+              </LinkButton>
+            )}
           </div>
         </div>
         <div className="flex flex-col gap-1 p-1">
@@ -582,41 +584,13 @@ function SelectorDivider() {
 }
 
 function HelpAndAI() {
-  const { isKapaEnabled, isKapaOpen, openKapa } = useKapaWidget();
+  const features = useFeatures();
 
   return (
     <>
       <ShortcutsAutoOpen />
-      <HelpAndFeedback disableShortcut={isKapaOpen} />
-      {isKapaEnabled && (
-        <TooltipProvider disableHoverableContent>
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <div className="inline-flex">
-                <Button
-                  variant="small-menu-item"
-                  data-action="ask-ai"
-                  shortcut={{ modifiers: ["mod"], key: "/", enabledOnInputElements: true }}
-                  hideShortcutKey
-                  data-modal-override-open-class-ask-ai="true"
-                  onClick={() => {
-                    openKapa();
-                  }}
-                >
-                  <AISparkleIcon className="size-5" />
-                </Button>
-              </div>
-            </TooltipTrigger>
-            <TooltipContent
-              side="top"
-              className="flex items-center gap-1 py-1.5 pl-2.5 pr-2 text-xs"
-            >
-              Ask AI
-              <ShortcutKey shortcut={{ modifiers: ["mod"], key: "/" }} variant="medium/bright" />
-            </TooltipContent>
-          </Tooltip>
-        </TooltipProvider>
-      )}
+      <HelpAndFeedback />
+      <AskAI />
     </>
   );
 }
