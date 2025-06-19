@@ -14,7 +14,7 @@ import { env } from "~/env.server";
 import { AuthenticatedEnvironment } from "~/services/apiAuth.server";
 import { logger } from "~/services/logger.server";
 import { getEntitlement } from "~/services/platform.v3.server";
-import { workerQueue } from "~/services/worker.server";
+import { commonWorker } from "~/v3/commonWorker.server";
 import { downloadPacketFromObjectStore, uploadPacketToObjectStore } from "../../v3/r2.server";
 import { ServiceValidationError, WithRunEngine } from "../../v3/services/baseService.server";
 import { OutOfEntitlementError, TriggerTaskService } from "../../v3/services/triggerTask.server";
@@ -58,7 +58,10 @@ export class RunEngineBatchTriggerService extends WithRunEngine {
   ) {
     super({ prisma });
 
-    this._batchProcessingStrategy = batchProcessingStrategy ?? "parallel";
+    // Eric note: We need to force sequential processing because when doing parallel, we end up with high-contention on the parent run lock
+    // becuase we are triggering a lot of runs at once, and each one is trying to lock the parent run.
+    // by forcing sequential, we are only ever locking the parent run for a single run at a time.
+    this._batchProcessingStrategy = "sequential";
   }
 
   public async call(
@@ -241,81 +244,84 @@ export class RunEngineBatchTriggerService extends WithRunEngine {
         }
       }
     } else {
-      return await $transaction(this._prisma, async (tx) => {
-        const batch = await tx.batchTaskRun.create({
-          data: {
-            id: BatchId.fromFriendlyId(batchId),
-            friendlyId: batchId,
-            runtimeEnvironmentId: environment.id,
-            runCount: body.items.length,
-            runIds: [],
-            payload: payloadPacket.data,
-            payloadType: payloadPacket.dataType,
-            options,
-            batchVersion: "runengine:v1",
-            oneTimeUseToken: options.oneTimeUseToken,
-          },
-        });
-
-        if (body.parentRunId && body.resumeParentOnCompletion) {
-          await this._engine.blockRunWithCreatedBatch({
-            runId: RunId.fromFriendlyId(body.parentRunId),
-            batchId: batch.id,
-            environmentId: environment.id,
-            projectId: environment.projectId,
-            organizationId: environment.organizationId,
-            tx,
-          });
-        }
-
-        switch (this._batchProcessingStrategy) {
-          case "sequential": {
-            await this.#enqueueBatchTaskRun({
-              batchId: batch.id,
-              processingId: batchId,
-              range: { start: 0, count: PROCESSING_BATCH_SIZE },
-              attemptCount: 0,
-              strategy: this._batchProcessingStrategy,
-              parentRunId: body.parentRunId,
-              resumeParentOnCompletion: body.resumeParentOnCompletion,
-            });
-
-            break;
-          }
-          case "parallel": {
-            const ranges = Array.from({
-              length: Math.ceil(body.items.length / PROCESSING_BATCH_SIZE),
-            }).map((_, index) => ({
-              start: index * PROCESSING_BATCH_SIZE,
-              count: PROCESSING_BATCH_SIZE,
-            }));
-
-            await Promise.all(
-              ranges.map((range, index) =>
-                this.#enqueueBatchTaskRun(
-                  {
-                    batchId: batch.id,
-                    processingId: `${index}`,
-                    range,
-                    attemptCount: 0,
-                    strategy: this._batchProcessingStrategy,
-                    parentRunId: body.parentRunId,
-                    resumeParentOnCompletion: body.resumeParentOnCompletion,
-                  },
-                  tx
-                )
-              )
-            );
-
-            break;
-          }
-        }
-
-        return batch;
+      const batch = await this._prisma.batchTaskRun.create({
+        data: {
+          id: BatchId.fromFriendlyId(batchId),
+          friendlyId: batchId,
+          runtimeEnvironmentId: environment.id,
+          runCount: body.items.length,
+          runIds: [],
+          payload: payloadPacket.data,
+          payloadType: payloadPacket.dataType,
+          options,
+          batchVersion: "runengine:v1",
+          oneTimeUseToken: options.oneTimeUseToken,
+        },
       });
+
+      if (body.parentRunId && body.resumeParentOnCompletion) {
+        await this._engine.blockRunWithCreatedBatch({
+          runId: RunId.fromFriendlyId(body.parentRunId),
+          batchId: batch.id,
+          environmentId: environment.id,
+          projectId: environment.projectId,
+          organizationId: environment.organizationId,
+        });
+      }
+
+      switch (this._batchProcessingStrategy) {
+        case "sequential": {
+          await this.#enqueueBatchTaskRun({
+            batchId: batch.id,
+            processingId: batchId,
+            range: { start: 0, count: PROCESSING_BATCH_SIZE },
+            attemptCount: 0,
+            strategy: this._batchProcessingStrategy,
+            parentRunId: body.parentRunId,
+            resumeParentOnCompletion: body.resumeParentOnCompletion,
+          });
+
+          break;
+        }
+        case "parallel": {
+          const ranges = Array.from({
+            length: Math.ceil(body.items.length / PROCESSING_BATCH_SIZE),
+          }).map((_, index) => ({
+            start: index * PROCESSING_BATCH_SIZE,
+            count: PROCESSING_BATCH_SIZE,
+          }));
+
+          await Promise.all(
+            ranges.map((range, index) =>
+              this.#enqueueBatchTaskRun({
+                batchId: batch.id,
+                processingId: `${index}`,
+                range,
+                attemptCount: 0,
+                strategy: this._batchProcessingStrategy,
+                parentRunId: body.parentRunId,
+                resumeParentOnCompletion: body.resumeParentOnCompletion,
+              })
+            )
+          );
+
+          break;
+        }
+      }
+
+      return batch;
     }
   }
 
+  async #enqueueBatchTaskRun(options: BatchProcessingOptions) {
+    await commonWorker.enqueue({
+      id: `RunEngineBatchTriggerService.process:${options.batchId}:${options.processingId}`,
+      job: "runengine.processBatchTaskRun",
+      payload: options,
+    });
+  }
+
+  // This is the function that the worker will call
   async processBatchTaskRun(options: BatchProcessingOptions) {
     logger.debug("[RunEngineBatchTrigger][processBatchTaskRun] Processing batch", {
       options,
@@ -646,13 +652,6 @@ export class RunEngineBatchTriggerService extends WithRunEngine {
           friendlyId: result.run.friendlyId,
         }
       : undefined;
-  }
-
-  async #enqueueBatchTaskRun(options: BatchProcessingOptions, tx?: PrismaClientOrTransaction) {
-    await workerQueue.enqueue("runengine.processBatchTaskRun", options, {
-      tx,
-      jobKey: `RunEngineBatchTriggerService.process:${options.batchId}:${options.processingId}`,
-    });
   }
 
   async #handlePayloadPacket(

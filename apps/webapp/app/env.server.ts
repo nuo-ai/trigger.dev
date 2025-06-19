@@ -1,5 +1,4 @@
 import { z } from "zod";
-import { SecretStoreOptionsSchema } from "./services/secrets/secretStoreOptionsSchema.server";
 import { isValidDatabaseUrl } from "./utils/db";
 import { isValidRegex } from "./utils/regex";
 import { BoolEnv } from "./utils/boolEnv";
@@ -36,12 +35,12 @@ const EnvironmentSchema = z.object({
   API_ORIGIN: z.string().optional(),
   STREAM_ORIGIN: z.string().optional(),
   ELECTRIC_ORIGIN: z.string().default("http://localhost:3060"),
+  // A comma separated list of electric origins to shard into different electric instances by environmentId
+  // example: "http://localhost:3060,http://localhost:3061,http://localhost:3062"
+  ELECTRIC_ORIGIN_SHARDS: z.string().optional(),
   APP_ENV: z.string().default(process.env.NODE_ENV),
   SERVICE_NAME: z.string().default("trigger.dev webapp"),
-  SECRET_STORE: SecretStoreOptionsSchema.default("DATABASE"),
   POSTHOG_PROJECT_KEY: z.string().default("phc_LFH7kJiGhdIlnO22hTAKgHpaKhpM8gkzWAFvHmf5vfS"),
-  TELEMETRY_TRIGGER_API_KEY: z.string().optional(),
-  TELEMETRY_TRIGGER_API_URL: z.string().optional(),
   TRIGGER_TELEMETRY_DISABLED: z.string().optional(),
   AUTH_GITHUB_CLIENT_ID: z.string().optional(),
   AUTH_GITHUB_CLIENT_SECRET: z.string().optional(),
@@ -56,30 +55,11 @@ const EnvironmentSchema = z.object({
   SMTP_PASSWORD: z.string().optional(),
 
   PLAIN_API_KEY: z.string().optional(),
-  RUNTIME_PLATFORM: z.enum(["docker-compose", "ecs", "local"]).default("local"),
   WORKER_SCHEMA: z.string().default("graphile_worker"),
   WORKER_CONCURRENCY: z.coerce.number().int().default(10),
   WORKER_POLL_INTERVAL: z.coerce.number().int().default(1000),
-  /** The number of days a failed Graphile task should stay before getting cleaned up */
-  WORKER_CLEANUP_TTL_DAYS: z.coerce.number().int().default(3),
-  EXECUTION_WORKER_CONCURRENCY: z.coerce.number().int().default(10),
-  EXECUTION_WORKER_POLL_INTERVAL: z.coerce.number().int().default(1000),
   WORKER_ENABLED: z.string().default("true"),
-  EXECUTION_WORKER_ENABLED: z.string().default("true"),
-  TASK_OPERATION_WORKER_ENABLED: z.string().default("true"),
-  TASK_OPERATION_WORKER_CONCURRENCY: z.coerce.number().int().default(10),
-  TASK_OPERATION_WORKER_POLL_INTERVAL: z.coerce.number().int().default(1000),
   GRACEFUL_SHUTDOWN_TIMEOUT: z.coerce.number().int().default(60000),
-  /** Optional. Only used if you use the apps/proxy */
-  AWS_SQS_REGION: z.string().optional(),
-  /** Optional. Only used if you use the apps/proxy */
-  AWS_SQS_ACCESS_KEY_ID: z.string().optional(),
-  /** Optional. Only used if you use the apps/proxy */
-  AWS_SQS_SECRET_ACCESS_KEY: z.string().optional(),
-  /** Optional. Only used if you use the apps/proxy */
-  AWS_SQS_QUEUE_URL: z.string().optional(),
-  AWS_SQS_BATCH_SIZE: z.coerce.number().int().optional().default(1),
-  AWS_SQS_WAIT_TIME_MS: z.coerce.number().int().optional().default(100),
   DISABLE_SSE: z.string().optional(),
   OPENAI_API_KEY: z.string().optional(),
 
@@ -184,6 +164,11 @@ const EnvironmentSchema = z.object({
     .default(process.env.REDIS_TLS_DISABLED ?? "false"),
   REALTIME_STREAMS_REDIS_CLUSTER_MODE_ENABLED: z.string().default("0"),
 
+  REALTIME_MAXIMUM_CREATED_AT_FILTER_AGE_IN_MS: z.coerce
+    .number()
+    .int()
+    .default(24 * 60 * 60 * 1000), // 1 day in milliseconds
+
   PUBSUB_REDIS_HOST: z
     .string()
     .optional()
@@ -215,11 +200,8 @@ const EnvironmentSchema = z.object({
   PUBSUB_REDIS_CLUSTER_MODE_ENABLED: z.string().default("0"),
 
   DEFAULT_ENV_EXECUTION_CONCURRENCY_LIMIT: z.coerce.number().int().default(100),
-  DEFAULT_ORG_EXECUTION_CONCURRENCY_LIMIT: z.coerce.number().int().default(100),
+  DEFAULT_ORG_EXECUTION_CONCURRENCY_LIMIT: z.coerce.number().int().default(300),
   DEFAULT_DEV_ENV_EXECUTION_ATTEMPTS: z.coerce.number().int().positive().default(1),
-
-  TUNNEL_HOST: z.string().optional(),
-  TUNNEL_SECRET_KEY: z.string().optional(),
 
   //API Rate limiting
   /**
@@ -240,35 +222,16 @@ const EnvironmentSchema = z.object({
   API_RATE_LIMIT_JWT_WINDOW: z.string().default("1m"),
   API_RATE_LIMIT_JWT_TOKENS: z.coerce.number().int().default(60),
 
-  //Realtime rate limiting
-  /**
-   * @example "60s"
-   * @example "1m"
-   * @example "1h"
-   * @example "1d"
-   * @example "1000ms"
-   * @example "1000s"
-   */
-  REALTIME_RATE_LIMIT_WINDOW: z.string().default("1m"),
-  REALTIME_RATE_LIMIT_TOKENS: z.coerce.number().int().default(100),
-  REALTIME_RATE_LIMIT_REQUEST_LOGS_ENABLED: z.string().default("0"),
-  REALTIME_RATE_LIMIT_REJECTION_LOGS_ENABLED: z.string().default("1"),
-  REALTIME_RATE_LIMIT_LIMITER_LOGS_ENABLED: z.string().default("0"),
-
-  //Ingesting event rate limit
-  INGEST_EVENT_RATE_LIMIT_WINDOW: z.string().default("60s"),
-  INGEST_EVENT_RATE_LIMIT_MAX: z.coerce.number().int().optional(),
-
   //v3
   PROVIDER_SECRET: z.string().default("provider-secret"),
   COORDINATOR_SECRET: z.string().default("coordinator-secret"),
   DEPOT_TOKEN: z.string().optional(),
   DEPOT_ORG_ID: z.string().optional(),
   DEPOT_REGION: z.string().default("us-east-1"),
-  DEPLOY_REGISTRY_HOST: z.string(),
+  DEPLOY_REGISTRY_HOST: z.string().min(1),
   DEPLOY_REGISTRY_USERNAME: z.string().optional(),
   DEPLOY_REGISTRY_PASSWORD: z.string().optional(),
-  DEPLOY_REGISTRY_NAMESPACE: z.string().default("trigger"),
+  DEPLOY_REGISTRY_NAMESPACE: z.string().min(1).default("trigger"),
   DEPLOY_IMAGE_PLATFORM: z.string().default("linux/amd64"),
   DEPLOY_TIMEOUT_MS: z.coerce
     .number()
@@ -377,8 +340,6 @@ const EnvironmentSchema = z.object({
     .default(process.env.REDIS_TLS_DISABLED ?? "false"),
   ALERT_RATE_LIMITER_REDIS_CLUSTER_MODE_ENABLED: z.string().default("0"),
 
-  MAX_SEQUENTIAL_INDEX_FAILURE_COUNT: z.coerce.number().default(96),
-
   LOOPS_API_KEY: z.string().optional(),
   MARQS_DISABLE_REBALANCING: BoolEnv.default(false),
   MARQS_VISIBILITY_TIMEOUT_MS: z.coerce
@@ -415,12 +376,8 @@ const EnvironmentSchema = z.object({
   USAGE_EVENT_URL: z.string().optional(),
   PROD_USAGE_HEARTBEAT_INTERVAL_MS: z.coerce.number().int().optional(),
 
-  CENTS_PER_VCPU_SECOND: z.coerce.number().default(0),
-  CENTS_PER_GB_RAM_SECOND: z.coerce.number().default(0),
   CENTS_PER_RUN: z.coerce.number().default(0),
 
-  USAGE_OPEN_METER_API_KEY: z.string().optional(),
-  USAGE_OPEN_METER_BASE_URL: z.string().optional(),
   EVENT_LOOP_MONITOR_ENABLED: z.string().default("1"),
   MAXIMUM_LIVE_RELOADING_EVENTS: z.coerce.number().int().default(1000),
   MAXIMUM_TRACE_SUMMARY_VIEW_COUNT: z.coerce.number().int().default(25_000),
@@ -471,6 +428,15 @@ const EnvironmentSchema = z.object({
   RUN_ENGINE_PROCESS_WORKER_QUEUE_DEBOUNCE_MS: z.coerce.number().int().default(200),
   RUN_ENGINE_DEQUEUE_BLOCKING_TIMEOUT_SECONDS: z.coerce.number().int().default(10),
   RUN_ENGINE_MASTER_QUEUE_CONSUMERS_INTERVAL_MS: z.coerce.number().int().default(500),
+
+  RUN_ENGINE_RUN_LOCK_DURATION: z.coerce.number().int().default(5000),
+  RUN_ENGINE_RUN_LOCK_AUTOMATIC_EXTENSION_THRESHOLD: z.coerce.number().int().default(1000),
+  RUN_ENGINE_RUN_LOCK_MAX_RETRIES: z.coerce.number().int().default(10),
+  RUN_ENGINE_RUN_LOCK_BASE_DELAY: z.coerce.number().int().default(100),
+  RUN_ENGINE_RUN_LOCK_MAX_DELAY: z.coerce.number().int().default(3000),
+  RUN_ENGINE_RUN_LOCK_BACKOFF_MULTIPLIER: z.coerce.number().default(1.8),
+  RUN_ENGINE_RUN_LOCK_JITTER_FACTOR: z.coerce.number().default(0.15),
+  RUN_ENGINE_RUN_LOCK_MAX_TOTAL_WAIT_TIME: z.coerce.number().int().default(15000),
 
   RUN_ENGINE_WORKER_REDIS_HOST: z
     .string()
@@ -726,6 +692,84 @@ const EnvironmentSchema = z.object({
   COMMON_WORKER_REDIS_TLS_DISABLED: z.string().default(process.env.REDIS_TLS_DISABLED ?? "false"),
   COMMON_WORKER_REDIS_CLUSTER_MODE_ENABLED: z.string().default("0"),
 
+  ALERTS_WORKER_ENABLED: z.string().default(process.env.WORKER_ENABLED ?? "true"),
+  ALERTS_WORKER_CONCURRENCY_WORKERS: z.coerce.number().int().default(2),
+  ALERTS_WORKER_CONCURRENCY_TASKS_PER_WORKER: z.coerce.number().int().default(10),
+  ALERTS_WORKER_POLL_INTERVAL: z.coerce.number().int().default(1000),
+  ALERTS_WORKER_IMMEDIATE_POLL_INTERVAL: z.coerce.number().int().default(100),
+  ALERTS_WORKER_CONCURRENCY_LIMIT: z.coerce.number().int().default(100),
+  ALERTS_WORKER_SHUTDOWN_TIMEOUT_MS: z.coerce.number().int().default(60_000),
+
+  ALERTS_WORKER_REDIS_HOST: z
+    .string()
+    .optional()
+    .transform((v) => v ?? process.env.REDIS_HOST),
+  ALERTS_WORKER_REDIS_READER_HOST: z
+    .string()
+    .optional()
+    .transform((v) => v ?? process.env.REDIS_READER_HOST),
+  ALERTS_WORKER_REDIS_READER_PORT: z.coerce
+    .number()
+    .optional()
+    .transform(
+      (v) =>
+        v ?? (process.env.REDIS_READER_PORT ? parseInt(process.env.REDIS_READER_PORT) : undefined)
+    ),
+  ALERTS_WORKER_REDIS_PORT: z.coerce
+    .number()
+    .optional()
+    .transform((v) => v ?? (process.env.REDIS_PORT ? parseInt(process.env.REDIS_PORT) : undefined)),
+  ALERTS_WORKER_REDIS_USERNAME: z
+    .string()
+    .optional()
+    .transform((v) => v ?? process.env.REDIS_USERNAME),
+  ALERTS_WORKER_REDIS_PASSWORD: z
+    .string()
+    .optional()
+    .transform((v) => v ?? process.env.REDIS_PASSWORD),
+  ALERTS_WORKER_REDIS_TLS_DISABLED: z.string().default(process.env.REDIS_TLS_DISABLED ?? "false"),
+  ALERTS_WORKER_REDIS_CLUSTER_MODE_ENABLED: z.string().default("0"),
+
+  SCHEDULE_ENGINE_LOG_LEVEL: z.enum(["log", "error", "warn", "info", "debug"]).default("info"),
+  SCHEDULE_WORKER_ENABLED: z.string().default(process.env.WORKER_ENABLED ?? "true"),
+  SCHEDULE_WORKER_CONCURRENCY_WORKERS: z.coerce.number().int().default(1),
+  SCHEDULE_WORKER_CONCURRENCY_TASKS_PER_WORKER: z.coerce.number().int().default(1),
+  SCHEDULE_WORKER_POLL_INTERVAL: z.coerce.number().int().default(1000),
+  SCHEDULE_WORKER_IMMEDIATE_POLL_INTERVAL: z.coerce.number().int().default(50),
+  SCHEDULE_WORKER_CONCURRENCY_LIMIT: z.coerce.number().int().default(50),
+  SCHEDULE_WORKER_SHUTDOWN_TIMEOUT_MS: z.coerce.number().int().default(30_000),
+  SCHEDULE_WORKER_DISTRIBUTION_WINDOW_SECONDS: z.coerce.number().int().default(30),
+
+  SCHEDULE_WORKER_REDIS_HOST: z
+    .string()
+    .optional()
+    .transform((v) => v ?? process.env.REDIS_HOST),
+  SCHEDULE_WORKER_REDIS_READER_HOST: z
+    .string()
+    .optional()
+    .transform((v) => v ?? process.env.REDIS_READER_HOST),
+  SCHEDULE_WORKER_REDIS_READER_PORT: z.coerce
+    .number()
+    .optional()
+    .transform(
+      (v) =>
+        v ?? (process.env.REDIS_READER_PORT ? parseInt(process.env.REDIS_READER_PORT) : undefined)
+    ),
+  SCHEDULE_WORKER_REDIS_PORT: z.coerce
+    .number()
+    .optional()
+    .transform((v) => v ?? (process.env.REDIS_PORT ? parseInt(process.env.REDIS_PORT) : undefined)),
+  SCHEDULE_WORKER_REDIS_USERNAME: z
+    .string()
+    .optional()
+    .transform((v) => v ?? process.env.REDIS_USERNAME),
+  SCHEDULE_WORKER_REDIS_PASSWORD: z
+    .string()
+    .optional()
+    .transform((v) => v ?? process.env.REDIS_PASSWORD),
+  SCHEDULE_WORKER_REDIS_TLS_DISABLED: z.string().default(process.env.REDIS_TLS_DISABLED ?? "false"),
+  SCHEDULE_WORKER_REDIS_CLUSTER_MODE_ENABLED: z.string().default("0"),
+
   TASK_EVENT_PARTITIONING_ENABLED: z.string().default("0"),
   TASK_EVENT_PARTITIONED_WINDOW_IN_SECONDS: z.coerce.number().int().default(60), // 1 minute
 
@@ -788,6 +832,14 @@ const EnvironmentSchema = z.object({
   RUN_REPLICATION_KEEP_ALIVE_ENABLED: z.string().default("1"),
   RUN_REPLICATION_KEEP_ALIVE_IDLE_SOCKET_TTL_MS: z.coerce.number().int().optional(),
   RUN_REPLICATION_MAX_OPEN_CONNECTIONS: z.coerce.number().int().default(10),
+
+  // Clickhouse
+  CLICKHOUSE_URL: z.string().optional(),
+  CLICKHOUSE_KEEP_ALIVE_ENABLED: z.string().default("1"),
+  CLICKHOUSE_KEEP_ALIVE_IDLE_SOCKET_TTL_MS: z.coerce.number().int().optional(),
+  CLICKHOUSE_MAX_OPEN_CONNECTIONS: z.coerce.number().int().default(10),
+  CLICKHOUSE_LOG_LEVEL: z.enum(["log", "error", "warn", "info", "debug"]).default("info"),
+  CLICKHOUSE_COMPRESSION_REQUEST: z.string().default("1"),
 
   // Bootstrap
   TRIGGER_BOOTSTRAP_ENABLED: z.string().default("0"),

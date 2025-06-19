@@ -52,6 +52,8 @@ import {
   TaskRunStatusCombo,
 } from "./TaskRunStatus";
 import { useEnvironment } from "~/hooks/useEnvironment";
+import { CopyableText } from "~/components/primitives/CopyableText";
+import { ClipboardField } from "~/components/primitives/ClipboardField";
 
 type RunsTableProps = {
   total: number;
@@ -134,7 +136,7 @@ export function TaskRunsTable({
               )}
             </TableHeaderCell>
           )}
-          <TableHeaderCell alignment="right">Run #</TableHeaderCell>
+          <TableHeaderCell>ID</TableHeaderCell>
           <TableHeaderCell>Task</TableHeaderCell>
           <TableHeaderCell>Version</TableHeaderCell>
           <TableHeaderCell
@@ -306,8 +308,21 @@ export function TaskRunsTable({
                     />
                   </TableCell>
                 )}
-                <TableCell to={path} alignment="right" isTabbableCell>
-                  {formatNumber(run.number)}
+                <TableCell to={path} isTabbableCell>
+                  <SimpleTooltip
+                    content={run.friendlyId}
+                    button={
+                      <span className="flex h-6 items-center gap-1">
+                        <CopyableText
+                          value={run.friendlyId.slice(-8)}
+                          copyValue={run.friendlyId}
+                          className="font-mono"
+                        />
+                      </span>
+                    }
+                    asChild
+                    disableHoverableContent
+                  />
                 </TableCell>
                 <TableCell to={path}>
                   <span className="flex items-center gap-x-1">
@@ -539,7 +554,7 @@ function BlankState({ isLoading, filters }: Pick<RunsTableProps, "isLoading" | "
   const environment = useEnvironment();
   if (isLoading) return <TableBlankRow colSpan={15}></TableBlankRow>;
 
-  const { environments, tasks, from, to, ...otherFilters } = filters;
+  const { tasks, from, to, ...otherFilters } = filters;
 
   if (
     filters.tasks.length === 1 &&

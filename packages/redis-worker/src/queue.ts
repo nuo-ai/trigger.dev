@@ -203,6 +203,7 @@ export class SimpleQueue<TMessageCatalog extends MessageCatalogSchema> {
             item: parsedItem,
             job: parsedItem.job,
             timestamp,
+            availableJobs: Object.keys(this.schema),
           });
           continue;
         }
@@ -292,6 +293,27 @@ export class SimpleQueue<TMessageCatalog extends MessageCatalogSchema> {
       });
       throw e;
     }
+  }
+
+  async getJob(id: string): Promise<QueueItem<TMessageCatalog> | null> {
+    const result = await this.redis.getJob(`queue`, `items`, id);
+
+    if (!result) {
+      return null;
+    }
+
+    const [_, score, serializedItem] = result;
+    const item = JSON.parse(serializedItem) as QueueItem<TMessageCatalog>;
+
+    return {
+      id,
+      job: item.job,
+      item: item.item,
+      visibilityTimeoutMs: item.visibilityTimeoutMs,
+      attempt: item.attempt ?? 0,
+      timestamp: new Date(Number(score)),
+      deduplicationKey: item.deduplicationKey ?? undefined,
+    };
   }
 
   async moveToDeadLetterQueue(id: string, errorMessage: string): Promise<void> {
@@ -421,6 +443,26 @@ export class SimpleQueue<TMessageCatalog extends MessageCatalogSchema> {
         end
 
         return dequeued
+      `,
+    });
+
+    this.redis.defineCommand("getJob", {
+      numberOfKeys: 2,
+      lua: `
+        local queue = KEYS[1]
+        local items = KEYS[2]
+        local jobId = ARGV[1]
+
+        local serializedItem = redis.call('HGET', items, jobId)
+
+        if serializedItem == false then
+          return nil
+        end
+
+        -- get the score from the queue sorted set
+        local score = redis.call('ZSCORE', queue, jobId)
+
+        return { jobId, score, serializedItem }
       `,
     });
 
@@ -596,5 +638,12 @@ declare module "@internal/redis" {
       serializedItem: string,
       callback?: Callback<number>
     ): Result<number, Context>;
+
+    getJob(
+      queue: string,
+      items: string,
+      id: string,
+      callback?: Callback<[string, string, string] | null>
+    ): Result<[string, string, string] | null, Context>;
   }
 }
