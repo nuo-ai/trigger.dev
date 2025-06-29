@@ -1,10 +1,10 @@
+import { createRedisClient, Redis, type RedisOptions } from "@internal/redis";
 import {
   Attributes,
   Histogram,
   Meter,
   metrics,
   ObservableResult,
-  SemanticAttributes,
   SpanKind,
   startSpan,
   trace,
@@ -14,13 +14,11 @@ import {
 import { Logger } from "@trigger.dev/core/logger";
 import { calculateNextRetryDelay } from "@trigger.dev/core/v3";
 import { type RetryOptions } from "@trigger.dev/core/v3/schemas";
-import { Redis, type RedisOptions } from "@internal/redis";
-import { z } from "zod";
-import { AnyQueueItem, SimpleQueue } from "./queue.js";
+import { shutdownManager } from "@trigger.dev/core/v3/serverOnly";
 import { nanoid } from "nanoid";
 import pLimit from "p-limit";
-import { createRedisClient } from "@internal/redis";
-import { shutdownManager } from "@trigger.dev/core/v3/serverOnly";
+import { z } from "zod";
+import { AnyQueueItem, SimpleQueue } from "./queue.js";
 
 export type WorkerCatalog = {
   [key: string]: {
@@ -34,13 +32,17 @@ type QueueCatalogFromWorkerCatalog<Catalog extends WorkerCatalog> = {
   [K in keyof Catalog]: Catalog[K]["schema"];
 };
 
-type JobHandler<Catalog extends WorkerCatalog, K extends keyof Catalog> = (params: {
+export type JobHandlerParams<Catalog extends WorkerCatalog, K extends keyof Catalog> = {
   id: string;
   payload: z.infer<Catalog[K]["schema"]>;
   visibilityTimeoutMs: number;
   attempt: number;
   deduplicationKey?: string;
-}) => Promise<void>;
+};
+
+export type JobHandler<Catalog extends WorkerCatalog, K extends keyof Catalog> = (
+  params: JobHandlerParams<Catalog, K>
+) => Promise<void>;
 
 export type WorkerConcurrencyOptions = {
   workers?: number;
@@ -204,7 +206,7 @@ class Worker<TCatalog extends WorkerCatalog> {
 
     // Launch a number of "worker loops" on the main thread.
     for (let i = 0; i < workers; i++) {
-      this.workerLoops.push(this.runWorkerLoop(`worker-${nanoid(12)}`, tasksPerWorker));
+      this.workerLoops.push(this.runWorkerLoop(`worker-${nanoid(12)}`, tasksPerWorker, i, workers));
     }
 
     this.setupShutdownHandlers();
@@ -380,18 +382,51 @@ class Worker<TCatalog extends WorkerCatalog> {
     );
   }
 
+  async getJob(id: string) {
+    return this.queue.getJob(id);
+  }
+
   /**
    * The main loop that each worker runs. It repeatedly polls for items,
    * processes them, and then waits before the next iteration.
    */
-  private async runWorkerLoop(workerId: string, taskCount: number): Promise<void> {
+  private async runWorkerLoop(
+    workerId: string,
+    taskCount: number,
+    workerIndex: number,
+    totalWorkers: number
+  ): Promise<void> {
     const pollIntervalMs = this.options.pollIntervalMs ?? 1000;
     const immediatePollIntervalMs = this.options.immediatePollIntervalMs ?? 100;
+
+    // Calculate the delay between starting each worker loop so that they don't all start at the same time.
+    const delayBetweenWorkers = this.options.pollIntervalMs ?? 1000;
+    const delay = delayBetweenWorkers * (totalWorkers - workerIndex);
+    await Worker.delay(delay);
+
+    this.logger.info("Starting worker loop", {
+      workerIndex,
+      totalWorkers,
+      delay,
+      workerId,
+      taskCount,
+      pollIntervalMs,
+      immediatePollIntervalMs,
+      concurrencyOptions: this.concurrency,
+    });
 
     while (!this.isShuttingDown) {
       // Check overall load. If at capacity, wait a bit before trying to dequeue more.
       if (this.limiter.activeCount + this.limiter.pendingCount >= this.concurrency.limit) {
+        this.logger.debug("Worker at capacity, waiting", {
+          workerId,
+          concurrencyOptions: this.concurrency,
+          activeCount: this.limiter.activeCount,
+          pendingCount: this.limiter.pendingCount,
+        });
+
         await Worker.delay(pollIntervalMs);
+
         continue;
       }
 
@@ -406,9 +441,24 @@ class Worker<TCatalog extends WorkerCatalog> {
         );
 
         if (items.length === 0) {
+          this.logger.debug("No items to dequeue", {
+            workerId,
+            concurrencyOptions: this.concurrency,
+            activeCount: this.limiter.activeCount,
+            pendingCount: this.limiter.pendingCount,
+          });
+
           await Worker.delay(pollIntervalMs);
           continue;
         }
+
+        this.logger.debug("Dequeued items", {
+          workerId,
+          itemCount: items.length,
+          concurrencyOptions: this.concurrency,
+          activeCount: this.limiter.activeCount,
+          pendingCount: this.limiter.pendingCount,
+        });
 
         // Schedule each item using the limiter.
         for (const item of items) {
@@ -427,6 +477,8 @@ class Worker<TCatalog extends WorkerCatalog> {
       // Wait briefly before immediately polling again since we processed items
       await Worker.delay(immediatePollIntervalMs);
     }
+
+    this.logger.info("Worker loop finished", { workerId });
   }
 
   /**

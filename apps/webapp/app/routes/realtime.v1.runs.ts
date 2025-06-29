@@ -9,6 +9,7 @@ const SearchParamsSchema = z.object({
     .transform((value) => {
       return value ? value.split(",") : undefined;
     }),
+  createdAt: z.string().optional(),
 });
 
 export const loader = createLoaderApiRoute(
@@ -28,6 +29,7 @@ export const loader = createLoaderApiRoute(
       request.url,
       authentication.environment,
       searchParams,
+      authentication.realtime,
       request.headers.get("x-trigger-electric-version") ?? undefined
     );
   }

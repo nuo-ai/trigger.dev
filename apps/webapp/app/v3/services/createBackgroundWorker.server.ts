@@ -23,9 +23,9 @@ import { clampMaxDuration } from "../utils/maxDuration";
 import { BaseService, ServiceValidationError } from "./baseService.server";
 import { CheckScheduleService } from "./checkSchedule.server";
 import { projectPubSub } from "./projectPubSub.server";
-import { RegisterNextTaskScheduleInstanceService } from "./registerNextTaskScheduleInstance.server";
 import { tryCatch } from "@trigger.dev/core/v3";
 import { engine } from "../runEngine.server";
+import { scheduleEngine } from "../scheduleEngine.server";
 
 export class CreateBackgroundWorkerService extends BaseService {
   public async call(
@@ -380,26 +380,36 @@ async function createWorkerQueue(
     prisma
   );
 
-  if (typeof concurrencyLimit === "number") {
-    logger.debug("createWorkerQueue: updating concurrency limit", {
-      workerId: worker.id,
-      taskQueue,
-      orgId: environment.organizationId,
-      projectId: environment.projectId,
-      environmentId: environment.id,
-      concurrencyLimit,
-    });
-    await updateQueueConcurrencyLimits(environment, taskQueue.name, concurrencyLimit);
+  if (!taskQueue.paused) {
+    if (typeof concurrencyLimit === "number") {
+      logger.debug("createWorkerQueue: updating concurrency limit", {
+        workerId: worker.id,
+        taskQueue,
+        orgId: environment.organizationId,
+        projectId: environment.projectId,
+        environmentId: environment.id,
+        concurrencyLimit,
+      });
+      await updateQueueConcurrencyLimits(environment, taskQueue.name, concurrencyLimit);
+    } else {
+      logger.debug("createWorkerQueue: removing concurrency limit", {
+        workerId: worker.id,
+        taskQueue,
+        orgId: environment.organizationId,
+        projectId: environment.projectId,
+        environmentId: environment.id,
+        concurrencyLimit,
+      });
+      await removeQueueConcurrencyLimits(environment, taskQueue.name);
+    }
   } else {
-    logger.debug("createWorkerQueue: removing concurrency limit", {
+    logger.debug("createWorkerQueue: queue is paused, not updating concurrency limit", {
       workerId: worker.id,
       taskQueue,
       orgId: environment.organizationId,
       projectId: environment.projectId,
       environmentId: environment.id,
-      concurrencyLimit,
     });
-    await removeQueueConcurrencyLimits(environment, taskQueue.name);
   }
 
   return taskQueue;
@@ -510,7 +520,6 @@ export async function syncDeclarativeSchedules(
   });
 
   const checkSchedule = new CheckScheduleService(prisma);
-  const registerNextService = new RegisterNextTaskScheduleInstanceService(prisma);
 
   //start out by assuming they're all missing
   const missingSchedules = new Set<string>(
@@ -520,6 +529,18 @@ export async function syncDeclarativeSchedules(
   //create/update schedules (+ instances)
   for (const task of tasksWithDeclarativeSchedules) {
     if (task.schedule === undefined) continue;
+
+    // Check if this schedule should be created in the current environment
+    if (task.schedule.environments && task.schedule.environments.length > 0) {
+      if (!task.schedule.environments.includes(environment.type)) {
+        logger.debug("Skipping schedule creation due to environment filter", {
+          taskId: task.id,
+          environmentType: environment.type,
+          allowedEnvironments: task.schedule.environments,
+        });
+        continue;
+      }
+    }
 
     const existingSchedule = existingDeclarativeSchedules.find(
       (schedule) =>
@@ -557,7 +578,7 @@ export async function syncDeclarativeSchedules(
       missingSchedules.delete(existingSchedule.id);
       const instance = schedule.instances.at(0);
       if (instance) {
-        await registerNextService.call(instance.id);
+        await scheduleEngine.registerNextTaskScheduleInstance({ instanceId: instance.id });
       } else {
         throw new CreateDeclarativeScheduleError(
           `Missing instance for declarative schedule ${schedule.id}`
@@ -589,7 +610,7 @@ export async function syncDeclarativeSchedules(
       const instance = newSchedule.instances.at(0);
 
       if (instance) {
-        await registerNextService.call(instance.id);
+        await scheduleEngine.registerNextTaskScheduleInstance({ instanceId: instance.id });
       } else {
         throw new CreateDeclarativeScheduleError(
           `Missing instance for declarative schedule ${newSchedule.id}`
